@@ -354,9 +354,34 @@ log_file = os.path.join(log_dir, f"log.txt")
 with open(log_file, "w") as f:  # open for writing to clear the file
     pass
 
+def eval_interval(step):
+    # validate more frequently early in training, less often once it stabilizes
+    return 20 if step < warmup_steps else 100
+
+
 for step in range(max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
+
+    if step % eval_interval(step) == 0 or last_step:
+        model.eval()
+        val_loader.reset()
+        with torch.no_grad():
+            val_loss_accum = 0.0
+            val_loss_steps = 20
+            for _ in range(val_loss_steps):
+                x_val, y_val = val_loader.next_batch()
+                x_val, y_val = x_val.to(device), y_val.to(device)
+                _, val_loss = model(x_val, y_val)
+                val_loss_accum += val_loss.detach() / val_loss_steps
+        if ddp:
+            dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+        if master_process:
+            print(f"step {step:5d} | val loss: {val_loss_accum.item():.4f}")
+            with open(log_file, "a") as f:
+                f.write(f"{step} val {val_loss_accum.item():.4f}\n")
+        model.train()
+
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
